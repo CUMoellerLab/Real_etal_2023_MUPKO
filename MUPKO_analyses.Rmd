@@ -1,0 +1,1906 @@
+---
+title: "Real_etal_2023_MUPKO"
+author: "Madalena V. F. Real"
+date: "23/09/2021"
+output: html_document
+---
+Reproducibility code for Real et al 2023, "Altered gut microbiota in Mup-knockout house mice"
+
+# Set-up
+```{r setup env, message=FALSE, warning=FALSE}
+# Remove the variables in the working environment
+rm(list = ls())
+
+# set to appropriate location
+# CHANGE
+setwd("C:/path/to/directory")
+
+# set paths
+if (interactive()){
+  try(file_name <- tail(strsplit(rstudioapi::getSourceEditorContext()$path, "/")[[1]], 1))
+} else {
+  file_name <- knitr::current_input()
+}
+file_name <- substr(file_name, 1, nchar(file_name)-4)
+
+# all figures will be output to a sub-folder with this file name appended with "_Figures"
+Save_Path <- paste0(getwd(), "/", file_name, "_Outputs/")
+dir.create(file.path(Save_Path), showWarnings = FALSE)
+
+```
+
+## Packages
+```{r load packages, message=FALSE, warning=FALSE}
+# set seed
+set.seed(8675309)
+
+# list of packages
+packages <- c("ggplot2",
+              "ape", 
+              "plyr", 
+              "grid", 
+              "reshape2",
+              "gridExtra", 
+              "cowplot", 
+              "vegan",
+              "dplyr",
+              "ggrepel",
+              "magrittr",
+              "RColorBrewer",
+              "foreach",
+              "vegan",
+              "Biostrings",
+              "devtools",
+              "phyloseq",
+              "DESeq2",
+              "picante",
+              "ggpubr",
+              "tidyverse",
+              "ggpubr",
+              "rstatix",
+              "nlme",
+              "compositions",
+              "curatedMetagenomicData",
+              "ggplot2",
+              "phyloseq",
+              "ANCOMBC",
+              "lmerTest",
+              "Maaslin2",
+              "writexl",
+              "openxlsx",
+              "microbiome")
+
+# install packages from bioconductor
+BiocManager::install(setdiff(packages,installed.packages()), update=FALSE)
+
+# list packages from github
+git_packages <- c("danielsprockett/tyRa",
+                  "danielsprockett/reltools",
+                  "gavinsimpson/ggvegan")
+
+
+# install packages from github
+library(devtools)
+git_package_names <- as.character(sapply(git_packages,function(x){strsplit(x,"/")[[1]][[2]]}))
+install_github(git_packages[which(git_package_names == setdiff(git_package_names,installed.packages()))])
+
+# load packages
+all_packages <- c(packages, git_package_names)
+
+n <- length(all_packages) - sum(sapply(all_packages,require,character.only=TRUE))
+
+# print if packages loaded properly
+if(n == 0){
+  print("All necessary R packages loaded properly")
+} else {
+  print(paste0(n, " R packages did not load properly"))
+}
+
+```
+
+## Palette
+```{r Palette}
+
+# Define Palette
+
+Genotype_color_pal <- c("steelblue2", "lightgoldenrod2")
+names(Genotype_color_pal) <- c("WT", "KO")
+
+G_by_G_color_pal <- c("steelblue2", "lightgoldenrod2", "palegreen3")
+names(G_by_G_color_pal) <- c("WT_WT", "KO_KO", "WT_KO")
+
+Sex_shape_pal <- c(24, 22)
+names(Sex_shape_pal) <- c("Male", "Female")
+
+Profile_shape_pal <- c(24, 22)
+names(Profile_shape_pal) <- c("Taxonomic", "Functional")
+```
+
+## Import data
+### Taxonomic profiles (MetaPhlan 4.0)
+```{r Importing and formating Metaphlan data}
+
+# Import components
+
+## Metadata
+md <- read.table("C:/path/to/directory/with/metadata.txt", header = TRUE, sep = "\t")
+rownames(md) <- md$Sample_ID # name rows by sample ID
+md$Mouse_ID <- as.factor(md$Mouse_ID)
+md <- subset (md, select = -c(X:X.19)) #Eliminate empty columns as needed
+md_m <- md # save original metadata
+
+# MetaPhlan 4.0
+
+## Non-rarefied reads
+ft_m_unr <- read.table("C:/path/to/directory/with/MUPKO_mpa4_nonraref_hostfilter.txt", header = TRUE, sep = "\t")
+ft_m <- ft_m_unr
+names(ft_m)=str_sub(names(ft_m),2,5)
+
+## Rarefied to 1M reads
+ft_m_r <- read.table("C:/path/to/directory/with/MUPKO_mpa4_raref1M_hostfilter.txt", header = TRUE, sep = "\t")
+ft_m <- ft_m_r
+names(ft_m)=str_sub(names(ft_m),2,5)
+
+### Subset table at species level
+colnames(ft_m)[1] <- c("clade_name")
+ft_m <- ft_m[grep("s__", ft_m$clade_name),]
+
+### make a table of the taxonomy strings
+ft <- ft_m
+tt <- colsplit(ft$clade_name, "\\|", names = c("Kingdom", "Phylum", "Class", "Order", "Family", "Genus", "Species", "Strain"))
+abbrv <- paste0(c("k", "p", "c", "o", "f", "g", "s", "t"), "__")
+for (i in seq_along(abbrv)) {tt[, i] <- gsub(abbrv[i], "", tt[, i])}
+tt$Strain[tt$Strain == ""] <- NA
+
+###make the rows names of both the feature table and the taxonomy table the species-level IDs
+rownames(tt) <- ifelse(is.na(tt$Strain), tt$Species, paste0(tt$Species,"_", tt$Strain))
+rownames(ft) <- rownames(tt)
+ft <- ft[,which(colnames(ft) != "clade_name")]
+
+ft_m <- ft
+tt_m <- tt
+
+# wrap the data together in a phyloseq object
+md <- md_m
+ft <- ft_m
+tt <- tt_m
+
+ps <- phyloseq(otu_table(ft, taxa_are_rows = TRUE),
+               tax_table(as.matrix(tt)),
+             sample_data(md))
+
+ps_m_r <- ps # for rarefied reads
+ps_m_unr <- ps # for non-rarefied reads
+
+```
+
+### Functional profiles (MG-RAST COGs)
+```{r Import COG data}
+# Import components
+
+## Metadata
+md <- read.table("C:/path/to/directory/with/metadata.txt", header = TRUE, sep = "\t")
+rownames(md) <- md$Sample_ID
+md$Mouse_ID <- as.factor(md$Mouse_ID)
+md <- subset (md, select = -c(X:X.19)) #Eliminate empty columns
+md_cog <- md
+
+# Import COG profiles data
+cog <- readr::read_tsv("C:/path/to/directory/with/MUPKO_COG.tsv", col_names = TRUE)
+cog <- cog[,-c(1:3)]
+
+# Import COG functions table data
+gt <- readr::read_tsv("C:/path/to/directory/with/MUPKO_COG_functions.tsv", col_names = TRUE)
+rownames(gt) <- gt$Function
+rownames(cog) <- gt$Function
+
+## Wrap into a phyloseq object
+md <- md_cog
+ps_cog <- phyloseq(otu_table(cog, taxa_are_rows = TRUE),
+                   tax_table(as.matrix(gt)),
+                   sample_data(md))
+```
+
+```{r Rarefy COGs}
+# Check COG count per sample
+count <- data.frame(NA)
+for (i in c(1:52)) {
+  sum <- sum(cog[, i], na.rm = TRUE)
+  count[i,] <- sum
+  rownames(count)[i] <- colnames(cog[, i])
+}
+hist(count$NA.) # check distribution
+min(count$NA.) # Lowest count
+
+# Rarefy --> only for alpha and beta diversity analysis
+ps <- ps_cog
+set.seed(8675309)
+ps_cog_r <- rarefy_even_depth(ps, rngseed = 8675309, sample.size = min(count$NA.), verbose = FALSE)
+
+```
+
+# Beta-Diversity
+## Taxonomic profiles
+
+### Sex comparison
+```{r B-div Tax: Sex}
+
+stats <- data.frame(NA)
+
+for (rank in list("Species", "Genus", "Family")) {
+  for (gen in list("WT", "KO")) {
+    for (metric in list("jaccard", "bray")) {
+          ps <- ps_m_r # Starting ps object
+          ps <- tax_glom(ps, taxrank = rank)
+          ps <- subset_samples(ps, Genotype == gen)
+          if (metric == "jaccard") {
+            ps_ord <- phyloseq::distance(ps, method = metric, normalized = TRUE, binary = TRUE)
+            } else {
+              ps_ord <- phyloseq::distance(ps, method = metric, normalized = TRUE, binary = FALSE)
+              }
+          
+          # Ordinate
+          ord_PCoA <- ordinate(ps, "PCoA", distance = ps_ord)
+          PC1 <- round(ord_PCoA$values$Relative_eig[1]*100, 1)
+          PC2 <- round(ord_PCoA$values$Relative_eig[2]*100, 1)
+          PC3 <- round(ord_PCoA$values$Relative_eig[3]*100, 1)
+          PC4 <- round(ord_PCoA$values$Relative_eig[4]*100, 1)
+          pcVar2 <- PC1 + PC2
+          pcVar4 <- PC1 + PC2 + PC3 + PC4
+          
+          # Put ordination results in dataframe with metadata
+          df <- cbind(ord_PCoA$vectors, sample_data(ps))
+          df$Genotype <- factor(df$Genotype, levels = c("WT", "KO"))
+          df$Sex <- factor(df$Sex, levels = c("Male", "Female"))
+          df$Litter <- as.factor(df$Litter)
+          df$Cage_ID <- as.factor(df$Cage_ID)
+          
+          # PERMANOVA
+          perms <- with(df, how(blocks = NULL, nperm = 999)) # Set permutation design
+          adonis_formula <- formula("ps_ord ~ Sex + Litter")
+          res <- adonis2(adonis_formula, data = df, permutations = perms, by = "terms", parallel = 4, na.action = na.exclude)
+          res
+
+          # Rename results columns and rownames
+          colnames(res)[1:5] <- paste(metric,rank,gen,colnames(res)[1:5], sep = "_")
+          rownames(res) <- paste0("adonis2_",rownames(res))
+          adonis_pval <- res[1,5]
+
+          # BetaDisper
+          res2 <- betadisper(ps_ord, df$Sex)
+          res2 <- permutest(res2, pairwise = FALSE, permutations = 1000)
+          res2
+
+          # Append Betadisper results to PERMANOVA dataframe as new row
+          res2 <- res2$tab # get stats
+          res2 <- res2[,-5] # remove N.Perm column
+          colnames(res2) <- colnames(res) # give columns same name as PERMANOVA results
+          rownames(res2) <- paste0("betadisper_",rownames(res2)) # rename row
+          betadisp_pval <- res2[1,5]
+          res3 <- rbind(res,res2)
+
+          # Append PERMANOVA + Betadisper results to stats dataframe as new columns
+          stats <- cbind(stats,res3)
+    }
+  }
+}
+
+stats_all <- stats[,-1]
+
+# Separate columns and row names
+# Columns
+d <- data.frame(colnames(stats_all))
+d <- cbind(d, do.call(rbind, strsplit(as.character(d$colnames.stats_all.), "_", fixed=TRUE)))
+colnames(d) <- c("colnames.stats_all", "distance", "rank", "gen", "stats")
+# Rows
+d2 <- data.frame(rownames(stats_all))
+d2 <- cbind(d2, do.call(rbind, strsplit(as.character(d2$rownames.stats_all.), "_", fixed=TRUE)))
+colnames(d2) <- c("rownames.stats_all", "test", "factor")
+
+# Add column names
+stats_all <- rbind(d$rank,d$gen,d$distance,d$stats,stats_all)
+rownames(stats_all)[1:4] <- c("Tax_Rank", "Genotype", "Distance_metric", "Stats")
+# Add row names
+d2 <- rbind(NA,NA,NA,NA,d2)
+stats_all <- cbind(d2$test,d2$factor,stats_all)
+colnames(stats_all)[1:2] <- colnames(d2)[2:3]
+
+# Export stats summary table
+write_xlsx(stats_all, "MUPKO_Bdiv_stats_sex.xlsx")
+
+```
+
+### Genotype comparison
+```{r B-div Tax: Genotype}
+
+rank = "Species"
+sex = "Male"
+metric = "jaccard"
+
+stats <- data.frame(NA)
+
+for (rank in list("Species", "Genus", "Family")) {
+  for (sex in list("Male", "Female")) {
+    for (metric in list("jaccard", "bray")) {
+          ps <- ps_m_r # Starting ps object
+          ps <- tax_glom(ps, taxrank = rank)
+          ps <- subset_samples(ps, Sex == sex)
+          if (metric == "jaccard") {
+            ps_ord <- phyloseq::distance(ps, method = metric, normalized = TRUE, binary = TRUE)
+            } else {
+              ps_ord <- phyloseq::distance(ps, method = metric, normalized = TRUE, binary = FALSE)
+              }
+          
+          # Ordinate
+          ord_PCoA <- ordinate(ps, "PCoA", distance = ps_ord)
+          PC1 <- round(ord_PCoA$values$Relative_eig[1]*100, 1)
+          PC2 <- round(ord_PCoA$values$Relative_eig[2]*100, 1)
+          PC3 <- round(ord_PCoA$values$Relative_eig[3]*100, 1)
+          PC4 <- round(ord_PCoA$values$Relative_eig[4]*100, 1)
+          pcVar2 <- PC1 + PC2
+          pcVar4 <- PC1 + PC2 + PC3 + PC4
+          
+          # Put ordination results in dataframe with metadata
+          df <- cbind(ord_PCoA$vectors, sample_data(ps))
+          df$Genotype <- factor(df$Genotype, levels = c("WT", "KO"))
+          df$Sex <- factor(df$Sex, levels = c("Male", "Female"))
+          df$Litter <- as.factor(df$Litter)
+          df$Cage_ID <- as.factor(df$Cage_ID)
+          
+          # PERMANOVA
+          perms <- with(df, how(blocks = NULL, nperm = 999)) # Set permutation design
+          adonis_formula <- formula("ps_ord ~ Genotype + Litter")
+          res <- adonis2(adonis_formula, data = df, permutations = perms, by = "terms", parallel = 4, na.action = na.exclude)
+          res
+
+          # Rename results columns and rownames
+          colnames(res)[1:5] <- paste(metric,rank,sex,colnames(res)[1:5], sep = "_")
+          rownames(res) <- paste0("adonis2_",rownames(res))
+          adonis_pval <- res[1,5]
+
+          # BetaDisper
+          res2 <- betadisper(ps_ord, df$Genotype) #Genotype
+          res2 <- permutest(res2, pairwise = FALSE, permutations = 1000)
+          res2
+
+          # Append Betadisper results to PERMANOVA dataframe as new row
+          res2 <- res2$tab # get stats
+          res2 <- res2[,-5] # remove N.Perm column
+          colnames(res2) <- colnames(res) # give columns same name as PERMANOVA results
+          rownames(res2) <- paste0("betadisper_",rownames(res2)) # rename row
+          betadisp_pval <- res2[1,5]
+          res3 <- rbind(res,res2)
+
+          # Append PERMANOVA + Betadisper results to stats dataframe as new columns
+          stats <- cbind(stats,res3)
+      
+          #Plot
+          analysis = paste0(rank)
+          full_metric <- ifelse(metric == "jaccard", "Jaccard Dissimilarity", "Bray-Curtis Dissimilarity")
+          title = paste0(full_metric, " (", analysis, ")")
+
+          p <- ggplot(df, aes(x = Axis.1, y = Axis.2))
+          p <- p + geom_point(aes(fill = Genotype, fill = Genotype, color = Genotype),
+                              size=3,  alpha = 0.8)
+          #p <- p + facet_grid( ~ Sex)
+          p <- p + scale_fill_manual(name = "Genotype", values = Genotype_color_pal)
+          p <- p + scale_color_manual(name = "Genotype", values = Genotype_color_pal)
+          p <- p + scale_shape_manual(name = "Profile", values = Profile_shape_pal)
+          p <- p + xlab(paste0("PC1 (", PC1, "%)"))
+          p <- p + ylab(paste0("PC2 (", PC2, "%)"))
+          #p <- p + xlim(-0.5,0.5) # adjust as needed
+          #p <- p + ylim(-0.35,0.35) # adjust as needed
+          p <- p + theme(
+                panel.background = element_rect(fill = "transparent",colour = "gray"),
+                plot.background = element_rect(fill = "transparent",colour = NA),
+                legend.background = element_rect(fill = "transparent",colour = NA),
+                panel.grid.major = element_blank(),
+                panel.grid.minor = element_blank(),
+                legend.key = element_rect(fill = "transparent",colour = NA),
+                axis.line = element_line(color = "gray50"))
+          p <- p + coord_fixed(sqrt(PC2 / PC1))
+          p
+
+          #Export figure as a PDF
+          pdf(paste0("Fig_", metric,"_",analysis,"_",sex,"_PCoA_mp4.pdf"), width = 8,height = 6)
+          print(p)
+          while (!is.null(dev.list()))  dev.off()
+    }
+  }
+}
+
+stats_all <- stats[,-1]
+
+# Separate columns and row names
+# Columns
+d <- data.frame(colnames(stats_all))
+d <- cbind(d, do.call(rbind, strsplit(as.character(d$colnames.stats_all.), "_", fixed=TRUE)))
+colnames(d) <- c("colnames.stats_all", "distance", "rank", "sex", "stats")
+# Rows
+d2 <- data.frame(rownames(stats_all))
+d2 <- cbind(d2, do.call(rbind, strsplit(as.character(d2$rownames.stats_all.), "_", fixed=TRUE)))
+colnames(d2) <- c("rownames.stats_all", "test", "factor")
+
+# Add column names
+stats_all <- rbind(d$rank,d$sex,d$distance,d$stats,stats_all)
+rownames(stats_all)[1:4] <- c("Tax_Rank", "Sex", "Distance_metric", "Stats")
+# Add row names
+d2 <- rbind(NA,NA,NA,NA,d2)
+stats_all <- cbind(d2$test,d2$factor,stats_all)
+colnames(stats_all)[1:2] <- colnames(d2)[2:3]
+
+# Export stats summary table
+write_xlsx(stats_all, "MUPKO_Bdiv_stats_genotype.xlsx")
+
+```
+
+### Taxa Overlap
+```{r Beta-div Tax: Taxa overlap}
+
+tax_overlap_list <- list()
+tax_overlap_plot_list <- list()
+
+for (rank in list("Species", "Genus", "Family")) {
+  for (metric in list("jaccard", "bray")) {
+        ps <- ps_m_r # Starting ps object
+        ps <- tax_glom(ps, taxrank = rank)
+        
+        # Make distance matrix
+        if (metric == "jaccard") {
+          mat <- phyloseq::distance(ps, method = metric, normalized = TRUE, binary = TRUE)
+          } else {
+            mat <- phyloseq::distance(ps, method = metric, normalized = TRUE, binary = FALSE)
+          }
+        df <- make_distance_df(ps, distances = metric, force_distance_calculations = TRUE, 
+                               variables = c("Mouse_ID", "Cage_ID", "Genotype", "Sex", "Timepoint"))
+        df$overlap <- 1 - df[,metric]
+        
+        # Label Genotype by genotype groups
+        df$s1_Genotype <- factor(df$s1_Genotype, levels = c("WT", "KO"))
+        df$s1_Sex <- factor(df$s1_Sex, levels = c("Male", "Female"))
+        df$Genotype_By_Genotype <- paste0(df$s1_Genotype, "_", df$s2_Genotype)
+        df$Genotype_By_Genotype[df$Genotype_By_Genotype == "KO_WT"] <- "WT_KO"
+        df$Genotype_By_Genotype <- factor(df$Genotype_By_Genotype, levels = c("WT_WT", "KO_KO", "WT_KO"))
+        
+        # Subset the data to include only rows where same_genotype is "yes"
+        df_subset <- subset(df, same_Genotype == "yes" & same_Sex == "yes")
+        
+        #Plot
+        analysis = paste0(rank)
+        full_metric <- ifelse(metric == "jaccard", "Jaccard Dissimilarity", "Bray-Curtis Dissimilarity")
+        title = paste0(analysis, " Overlap (", full_metric, ")")
+        
+        p <- ggplot(df_subset, aes(x = s1_Timepoint , y = overlap))
+        p <- p + geom_boxplot(aes(fill = Genotype_By_Genotype), outlier.shape = NA)
+        p <- p + geom_point(aes(fill = Genotype_By_Genotype), shape = 21, alpha = 0.2, position = "jitter")
+        p <- p + facet_grid(s1_Sex ~ s1_Genotype, scales = "free")
+        p <- p + stat_compare_means(label = "p.signif", method = "wilcox.test", 
+                   p.adjust.method = "holm",
+                   hide.ns = F, label.x.npc = 0.5, label.y.npc = 0.9) # label = "p.format"
+        p <- p + xlab("")
+        p <- p + ylab(title)
+        p <- p + scale_fill_manual(values = G_by_G_color_pal)
+        p <- p + ylim(c(0,1))
+        p <- p + theme(
+              panel.background = element_rect(fill = "transparent",colour = NA),
+              plot.background = element_rect(fill = "transparent",colour = NA),
+              legend.background = element_rect(fill = "transparent",colour = NA),
+              legend.position = "none",
+              panel.grid.major = element_blank(),
+              panel.grid.minor = element_blank(),
+              legend.key = element_rect(fill = "transparent",colour = NA),
+              axis.line = element_line(color = "gray50"))
+        p
+        
+        #Save results by appending them to a list
+        tax_overlap_list[[paste("df", rank, metric, timepoint, sex, sep = "_")]] <- df
+        tax_overlap_plot_list[[paste("p", metric, rank, timepoint, sex, sep = "_")]] <- p
+        
+        # Export as PDF
+        pdf(paste("Fig",metric, rank,"dissimilarity_facet_GenSex.pdf", sep = "_"), width = 9,height = 6)
+        print(p)
+        while (!is.null(dev.list()))  dev.off()
+  }
+}
+
+```
+
+### Male subsampling
+```{r Beta div: male subsampling}
+
+stats <- data.frame(NA)
+
+for (male in list("219","224","256","257")) {
+  for (rank in list("Species", "Genus", "Family")) {
+        for (metric in list("jaccard", "bray")) {
+          ps <- ps_m_r # Starting ps object
+          ps <- tax_glom(ps, taxrank = rank)
+          ps <- subset_samples(ps, Timepoint == timepoint & Sex == sex & Mouse_ID!= male)
+          if (metric == "jaccard") {
+            ps_ord <- phyloseq::distance(ps, method = metric, normalized = TRUE, binary = TRUE)
+            } else {
+              ps_ord <- phyloseq::distance(ps, method = metric, normalized = TRUE, binary = FALSE)
+              }
+          
+          # Ordinate
+          ord_PCoA <- ordinate(ps, "PCoA", distance = ps_ord)
+          PC1 <- round(ord_PCoA$values$Relative_eig[1]*100, 1)
+          PC2 <- round(ord_PCoA$values$Relative_eig[2]*100, 1)
+          PC3 <- round(ord_PCoA$values$Relative_eig[3]*100, 1)
+          PC4 <- round(ord_PCoA$values$Relative_eig[4]*100, 1)
+          pcVar2 <- PC1 + PC2
+          pcVar4 <- PC1 + PC2 + PC3 + PC4
+          
+          # Put ordination results in dataframe with metadata
+          df <- cbind(ord_PCoA$vectors, sample_data(ps))
+          df$Genotype <- factor(df$Genotype, levels = c("WT", "KO"))
+          df$Sex <- factor(df$Sex, levels = c("Male", "Female"))
+          df$Litter <- as.factor(df$Litter)
+          df$Cage_ID <- as.factor(df$Cage_ID)
+          
+          # PERMANOVA
+          perms <- with(df, how(blocks = NULL, nperm = 999)) # Set permutation design
+          adonis_formula <- formula("ps_ord ~ Genotype + Litter")
+          res <- adonis2(adonis_formula, data = df, permutations = perms, by = "terms", parallel = 4, na.action = na.exclude)
+          res
+
+          # Rename results columns and rownames
+          colnames(res)[1:5] <- paste(metric,rank,sex,timepoint,male,colnames(res)[1:5], sep = "_")
+          rownames(res) <- paste0("adonis2_",rownames(res))
+          adonis_pval <- res[1,5]
+
+          # BetaDisper
+          res2 <- betadisper(ps_ord, df$Genotype)
+          res2 <- permutest(res2, pairwise = FALSE, permutations = 1000)
+          res2
+
+          # Append Betadisper results to PERMANOVA dataframe as new row
+          res2 <- res2$tab # get stats
+          res2 <- res2[,-5] # remove N.Perm column
+          colnames(res2) <- colnames(res) # give columns same name as PERMANOVA results
+          rownames(res2) <- paste0("betadisper_",rownames(res2)) # rename row
+          betadisp_pval <- res2[1,5]
+          res3 <- rbind(res,res2)
+
+          # Append PERMANOVA + Betadisper results to stats dataframe as new columns
+          stats <- cbind(stats,res3)
+        }
+  }
+}
+
+stats_all <- stats[,-1]
+
+# Separate columns and row names
+# Columns
+d <- data.frame(colnames(stats_all))
+d <- cbind(d, do.call(rbind, strsplit(as.character(d$colnames.stats_all.), "_", fixed=TRUE)))
+colnames(d) <- c("colnames.stats_all", "distance", "rank", "sex", "timepoint", "male", "stats") 
+# Rows
+d2 <- data.frame(rownames(stats_all))
+d2 <- cbind(d2, do.call(rbind, strsplit(as.character(d2$rownames.stats_all.), "_", fixed=TRUE)))
+colnames(d2) <- c("rownames.stats_all", "test", "factor")
+
+# Add column names
+stats_all <- rbind(d$rank,d$timepoint,d$sex,d$distance, d$male,d$stats,stats_all)
+rownames(stats_all)[1:5] <- c("Tax_Rank", "Timepoint", "Sex", "Distance_metric", "remv_male", "Stats")
+# Add row names
+d2 <- rbind(NA,NA,NA,NA,NA,NA,d2)
+stats_all <- cbind(d2$test,d2$factor,stats_all)
+colnames(stats_all)[1:2] <- colnames(d2)[2:3]
+
+# Export stats summary table
+write_xlsx(stats_all, "MUPKO_Bdiv_stats_subsampling.xlsx")
+
+```
+
+## Functional profiles
+
+### Sex comparison
+```{r Beta-div Fun: Sex}
+
+stats <- data.frame(NA)
+
+for (rank in list("Function", "Level2")) {
+  for (gen in list("WT", "KO")) {
+      for (metric in list("jaccard", "bray")) {
+          ps <- ps_cog_r # Starting ps object
+          if (rank == "Function") {
+            } else {
+              ps <- tax_glom(ps, taxrank = rank)
+            }
+          ps <- subset_samples(ps, Genotype == gen)
+          if (metric == "jaccard") {
+            ps_ord <- phyloseq::distance(ps, method = metric, normalized = TRUE, binary = TRUE)
+            } else {
+              ps_ord <- phyloseq::distance(ps, method = metric, normalized = TRUE, binary = FALSE)
+              }
+          
+          # Ordinate
+          ord_PCoA <- ordinate(ps, "PCoA", distance = ps_ord)
+          PC1 <- round(ord_PCoA$values$Relative_eig[1]*100, 1)
+          PC2 <- round(ord_PCoA$values$Relative_eig[2]*100, 1)
+          PC3 <- round(ord_PCoA$values$Relative_eig[3]*100, 1)
+          PC4 <- round(ord_PCoA$values$Relative_eig[4]*100, 1)
+          pcVar2 <- PC1 + PC2
+          pcVar4 <- PC1 + PC2 + PC3 + PC4
+          
+          # Put ordination results in dataframe with metadata
+          df <- cbind(ord_PCoA$vectors, sample_data(ps))
+          df$Genotype <- factor(df$Genotype, levels = c("WT", "KO"))
+          df$Sex <- factor(df$Sex, levels = c("Male", "Female"))
+          df$Litter <- as.factor(df$Litter)
+          df$Cage_ID <- as.factor(df$Cage_ID)
+          
+          # PERMANOVA
+          perms <- with(df, how(blocks = NULL, nperm = 999)) # Set permutation design
+          adonis_formula <- formula("ps_ord ~ Sex + Litter")
+          res <- adonis2(adonis_formula, data = df, permutations = perms, by = "terms", parallel = 4, na.action = na.exclude)
+          res
+
+          # Rename results columns and rownames
+          colnames(res)[1:5] <- paste(metric,rank,gen,colnames(res)[1:5], sep = "_")
+          rownames(res) <- paste0("adonis2_",rownames(res))
+          adonis_pval <- res[1,5]
+
+          # BetaDisper
+          res2 <- betadisper(ps_ord, df$Sex)
+          res2 <- permutest(res2, pairwise = FALSE, permutations = 1000)
+          res2
+
+          # Append Betadisper results to PERMANOVA dataframe as new row
+          res2 <- res2$tab # get stats
+          res2 <- res2[,-5] # remove N.Perm column
+          colnames(res2) <- colnames(res) # give columns same name as PERMANOVA results
+          rownames(res2) <- paste0("betadisper_",rownames(res2)) # rename row
+          betadisp_pval <- res2[1,5]
+          res3 <- rbind(res,res2)
+
+          # Append PERMANOVA + Betadisper results to stats dataframe as new columns
+          stats <- cbind(stats,res3)
+    }
+  }
+}
+
+stats_all <- stats[,-1]
+
+# Separate columns and row names
+# Columns
+d <- data.frame(colnames(stats_all))
+d <- cbind(d, do.call(rbind, strsplit(as.character(d$colnames.stats_all.), "_", fixed=TRUE)))
+colnames(d) <- c("colnames.stats_all", "distance", "rank", "gen", "stats")
+# Rows
+d2 <- data.frame(rownames(stats_all))
+d2 <- cbind(d2, do.call(rbind, strsplit(as.character(d2$rownames.stats_all.), "_", fixed=TRUE)))
+colnames(d2) <- c("rownames.stats_all", "test", "factor")
+
+# Add column names
+stats_all <- rbind(d$rank,d$gen,d$distance,d$stats,stats_all)
+rownames(stats_all)[1:4] <- c("COG_Rank", "Genotype", "Distance_metric", "Stats")
+# Add row names
+d2 <- rbind(NA,NA,NA,NA,d2)
+stats_all <- cbind(d2$test,d2$factor,stats_all)
+colnames(stats_all)[1:2] <- colnames(d2)[2:3]
+
+# Export stats summary table
+write_xlsx(stats_all, "MUPKO_COG_Bdiv_stats_sex.xlsx")
+
+```
+
+### Genotype comparison
+```{r Beta-div Fun: Genotype}
+
+stats <- data.frame(NA)
+
+for (rank in list("Function", "Level2")) {
+  for (sex in list("Male", "Female")) {
+    for (metric in list("jaccard", "bray")) {
+          ps <- ps_cog_r # Starting ps object
+          if (rank == "Function") {
+            } else {
+              ps <- tax_glom(ps, taxrank = rank)
+            }
+          ps <- subset_samples(ps, Sex == sex)
+          if (metric == "jaccard") {
+            ps_ord <- phyloseq::distance(ps, method = metric, normalized = TRUE, binary = TRUE)
+            } else {
+              ps_ord <- phyloseq::distance(ps, method = metric, normalized = TRUE, binary = FALSE)
+            }
+          
+          # Ordinate
+          ord_PCoA <- ordinate(ps, "PCoA", distance = ps_ord)
+          PC1 <- round(ord_PCoA$values$Relative_eig[1]*100, 1)
+          PC2 <- round(ord_PCoA$values$Relative_eig[2]*100, 1)
+          PC3 <- round(ord_PCoA$values$Relative_eig[3]*100, 1)
+          PC4 <- round(ord_PCoA$values$Relative_eig[4]*100, 1)
+          pcVar2 <- PC1 + PC2
+          pcVar4 <- PC1 + PC2 + PC3 + PC4
+          
+          # Put ordination results in dataframe with metadata
+          df <- cbind(ord_PCoA$vectors, sample_data(ps))
+          df$Genotype <- factor(df$Genotype, levels = c("WT", "KO"))
+          df$Sex <- factor(df$Sex, levels = c("Male", "Female"))
+          df$Litter <- as.factor(df$Litter)
+          df$Cage_ID <- as.factor(df$Cage_ID)
+          
+          # PERMANOVA
+          perms <- with(df, how(blocks = NULL, nperm = 999)) # Set permutation design
+          adonis_formula <- formula("ps_ord ~ Genotype + Litter") # subsetted
+          res <- adonis2(adonis_formula, data = df, permutations = perms, by = "terms", parallel = 4, na.action = na.exclude)
+          res
+          adonis_pval <- res[1,5]
+
+          # Rename results columns and rownames
+          colnames(res)[1:5] <- paste(metric,rank,sex,colnames(res)[1:5], sep = "_")
+          rownames(res) <- paste0("adonis2_",rownames(res))
+
+          # BetaDisper
+          res2 <- betadisper(ps_ord, df$Genotype)
+          res2 <- permutest(res2, pairwise = FALSE, permutations = 1000)
+
+          # Append Betadisper results to PERMANOVA dataframe as new row
+          res2 <- res2$tab # get stats
+          res2 <- res2[,-5] # remove N.Perm column
+          colnames(res2) <- colnames(res) # give columns same name as PERMANOVA results
+          rownames(res2) <- paste0("betadisper_",rownames(res2)) # rename row
+          betadisp_pval <- res2[1,5]
+          res3 <- rbind(res,res2)
+
+          # Append PERMANOVA + Betadisper results to stats dataframe as new columns
+          stats <- cbind(stats,res3)
+          
+          #Plot
+          analysis = paste0(rank)
+          full_metric <- ifelse(metric == "jaccard", "Jaccard Dissimilarity","Bray-Curtis Dissimilarity")
+          title = paste0(full_metric, " (COG ", analysis, ")")
+
+          p <- ggplot(df, aes(x = Axis.1, y = Axis.2))
+          p <- p + geom_point(aes(fill = Genotype, fill = Genotype, color = Genotype),
+                              size=3,  alpha = 0.8) # shape = Litter
+          #p <- p + facet_grid(~ Sex)
+          p <- p + scale_fill_manual(name = "Genotype", values = Genotype_color_pal)
+          p <- p + scale_color_manual(name = "Genotype", values = Genotype_color_pal)
+          p <- p + xlab(paste0("PC1 (", PC1, "%)"))
+          p <- p + ylab(paste0("PC2 (", PC2, "%)"))
+          #p <- p + xlim(-0.26,0.1)
+          #p <- p + ylim(-0.11,0.11)
+          p <- p + theme(
+                panel.background = element_rect(fill = "transparent",colour = "gray"),
+                plot.background = element_rect(fill = "transparent",colour = NA),
+                legend.background = element_rect(fill = "transparent",colour = NA),
+                panel.grid.major = element_blank(),
+                panel.grid.minor = element_blank(),
+                legend.key = element_rect(fill = "transparent",colour = NA),
+                axis.line = element_line(color = "gray50"))
+          p <- p + coord_fixed(sqrt(PC2 / PC1))
+          p
+
+          #Export figure as a PDF
+          pdf(paste0("Fig_", metric,"_", analysis,"_",timepoint, "_PCoA_COG.pdf"), width = 8,height = 6)
+          print(p)
+          while (!is.null(dev.list()))  dev.off()
+    }
+  }
+}
+
+stats_all <- stats[,-1]
+
+# Separate columns and row names
+# Columns
+d <- data.frame(colnames(stats_all))
+d <- cbind(d, do.call(rbind, strsplit(as.character(d$colnames.stats_all.), "_", fixed=TRUE)))
+colnames(d) <- c("colnames.stats_all", "distance", "rank", "sex", "stats")
+# Rows
+d2 <- data.frame(rownames(stats_all))
+d2 <- cbind(d2, do.call(rbind, strsplit(as.character(d2$rownames.stats_all.), "_", fixed=TRUE)))
+colnames(d2) <- c("rownames.stats_all", "test", "factor")
+
+# Add column names
+stats_all <- rbind(d$rank,d$sex,d$distance,d$stats,stats_all)
+rownames(stats_all)[1:4] <- c("COG_Rank", "Sex", "Distance_metric", "Stats")
+# Add row names
+d2 <- rbind(NA,NA,NA,NA,d2)
+stats_all <- cbind(d2$test,d2$factor,stats_all)
+colnames(stats_all)[1] <- colnames(d2)[2]
+
+# Export stats summary table
+write_xlsx(stats_all, "MUPKO_COG_Bdiv_stats_genotype.xlsx")
+
+```
+
+### COG Overlap
+```{r Loop for COG overlap}
+
+COG_overlap_list <- list()
+COG_overlap_plot_list <- list()
+
+for (rank in list("Function", "Level2")) {
+  for (metric in list("jaccard", "bray")) {
+        ps <- ps_cog_r # Starting ps object
+        if (rank == "Function") {
+            } else {
+              ps <- tax_glom(ps, taxrank = rank)
+            }
+        
+        # Make distance matrix
+        if (metric == "jaccard") {
+          mat <- phyloseq::distance(ps, method = metric, normalized = TRUE, binary = TRUE)
+          } else {
+            mat <- phyloseq::distance(ps, method = metric, normalized = TRUE, binary = FALSE)
+          }
+        df <- make_distance_df(ps, distances = metric, force_distance_calculations = TRUE, 
+                               variables = c("Mouse_ID", "Cage_ID", "Genotype", "Sex", "Timepoint"))
+        df$overlap <- 1 - df[,metric]
+        colnames(df)[18] <- "metric"
+        
+        # Label Genotype by genotype groups
+        df$s1_Genotype <- factor(df$s1_Genotype, levels = c("WT", "KO"))
+        df$s1_Sex <- factor(df$s1_Sex, levels = c("Male", "Female"))
+        df$Genotype_By_Genotype <- paste0(df$s1_Genotype, "_", df$s2_Genotype)
+        df$Genotype_By_Genotype[df$Genotype_By_Genotype == "KO_WT"] <- "WT_KO"
+        df$Genotype_By_Genotype <- factor(df$Genotype_By_Genotype, levels = c("WT_WT", "KO_KO", "WT_KO"))
+        df$Metric <- metric
+        df$Metric <- factor(df$Metric, levels = c("jaccard", "bray"))
+        df$Rank <- rank
+        
+        # Subset the data to include only rows where same_genotype is "yes"
+        df_subset <- subset(df, same_Genotype == "yes" & same_Sex == "yes")
+        
+        #Plot
+        analysis = paste0(rank)
+        full_metric <- ifelse(metric == "jaccard", "Jaccard Similarity","Bray-Curtis Similarity")
+        title = paste0(analysis, " Overlap")
+        
+        p <- ggplot(df_subset, aes(x = s1_Genotype , y = overlap))
+        p <- p + geom_boxplot(aes(fill = Genotype_By_Genotype), outlier.shape = NA, width = 0.4)
+        p <- p + geom_point(aes(fill = Genotype_By_Genotype), shape = 21, alpha = 0.4, position = "jitter")
+        p <- p + facet_grid(~s1_Sex) #scales = "free" nrow = 1
+        p <- p + xlab("")
+        p <- p + ylab(title)
+        p <- p + scale_fill_manual(values = G_by_G_color_pal)
+        p <- p + theme(
+              panel.background = element_rect(fill = "transparent",colour = NA),
+              plot.background = element_rect(fill = "transparent",colour = NA),
+              legend.background = element_rect(fill = "transparent",colour = NA),
+              legend.position = "none",
+              panel.grid.major = element_blank(),
+              panel.grid.minor = element_blank(),
+              legend.key = element_rect(fill = "transparent",colour = NA),
+              axis.line = element_line(color = "gray50"))
+        p
+        
+        #Save results by appending them to a list
+        COG_overlap_list[[paste("df", rank, metric, timepoint, sex, sep = "_")]] <- df
+        COG_overlap_plot_list[[paste("p", metric, rank, timepoint, sex, sep = "_")]] <- p
+        
+        # Export as PDF
+        pdf(paste("Fig",rank,timepoint,"Overlap.pdf", sep = "_"), width = 8, height = 6)
+        print(p)
+        while (!is.null(dev.list()))  dev.off()
+  }
+}
+```
+
+### Male subsampling
+```{r Beta-div Fun: Male subsampling}
+
+stats <- data.frame(NA)
+
+for (male in list("219","224","256","257")) {
+  for (rank in list("Function", "Level2")) {
+    for (sex in list("Male")) {
+      for (metric in list("jaccard", "bray")) {
+          ps <- ps_cog_r # Starting ps object
+          if (rank == "Function") {
+            } else {
+              ps <- tax_glom(ps, taxrank = rank)
+            }
+          ps <- subset_samples(ps, Sex == sex & Mouse_ID != male)
+          if (metric == "jaccard") {
+            ps_ord <- phyloseq::distance(ps, method = metric, normalized = TRUE, binary = TRUE)
+            } else {
+              ps_ord <- phyloseq::distance(ps, method = metric, normalized = TRUE, binary = FALSE)
+            }
+          
+          # Ordinate
+          ord_PCoA <- ordinate(ps, "PCoA", distance = ps_ord)
+          PC1 <- round(ord_PCoA$values$Relative_eig[1]*100, 1)
+          PC2 <- round(ord_PCoA$values$Relative_eig[2]*100, 1)
+          PC3 <- round(ord_PCoA$values$Relative_eig[3]*100, 1)
+          PC4 <- round(ord_PCoA$values$Relative_eig[4]*100, 1)
+          pcVar2 <- PC1 + PC2
+          pcVar4 <- PC1 + PC2 + PC3 + PC4
+          
+          # Put ordination results in dataframe with metadata
+          df <- cbind(ord_PCoA$vectors, sample_data(ps))
+          df$Genotype <- factor(df$Genotype, levels = c("WT", "KO"))
+          df$Sex <- factor(df$Sex, levels = c("Male", "Female"))
+          df$Litter <- as.factor(df$Litter)
+          df$Cage_ID <- as.factor(df$Cage_ID)
+          
+          # PERMANOVA
+          perms <- with(df, how(blocks = NULL, nperm = 999)) # Set permutation design
+          adonis_formula <- formula("ps_ord ~ Genotype + Litter") # subsetted
+          res <- adonis2(adonis_formula, data = df, permutations = perms, by = "terms", parallel = 4, na.action = na.exclude)
+          res
+          adonis_pval <- res[1,5]
+
+          # Rename results columns and rownames
+          colnames(res)[1:5] <- paste(metric,rank,sex,male,colnames(res)[1:5], sep = "_")
+          rownames(res) <- paste0("adonis2_",rownames(res))
+
+          # BetaDisper
+          res2 <- betadisper(ps_ord, df$Genotype)
+          res2 <- permutest(res2, pairwise = FALSE, permutations = 1000)
+
+          # Append Betadisper results to PERMANOVA dataframe as new row
+          res2 <- res2$tab # get stats
+          res2 <- res2[,-5] # remove N.Perm column
+          colnames(res2) <- colnames(res) # give columns same name as PERMANOVA results
+          rownames(res2) <- paste0("betadisper_",rownames(res2)) # rename row
+          betadisp_pval <- res2[1,5]
+          res3 <- rbind(res,res2)
+
+          # Append PERMANOVA + Betadisper results to stats dataframe as new columns
+          stats <- cbind(stats,res3)
+      }
+    }
+  }
+}
+
+stats_all <- stats[,-1]
+
+# Separate columns and row names
+# Columns
+d <- data.frame(colnames(stats_all))
+d <- cbind(d, do.call(rbind, strsplit(as.character(d$colnames.stats_all.), "_", fixed=TRUE)))
+colnames(d) <- c("colnames.stats_all", "distance", "rank", "sex", "male", "stats")
+# Rows
+d2 <- data.frame(rownames(stats_all))
+d2 <- cbind(d2, do.call(rbind, strsplit(as.character(d2$rownames.stats_all.), "_", fixed=TRUE)))
+colnames(d2) <- c("rownames.stats_all", "test", "factor")
+
+# Add column names
+stats_all <- rbind(d$rank,d$male,d$sex,d$distance,d$stats,stats_all)
+rownames(stats_all)[1:5] <- c("COG_Rank", "Male", "Sex", "Distance_metric", "Stats")
+# Add row names
+d2 <- rbind(NA,NA,NA,NA,NA,d2)
+stats_all <- cbind(d2$test,d2$factor,stats_all)
+colnames(stats_all)[1] <- colnames(d2)[2]
+
+# Export stats summary table
+write_xlsx(stats_all, "MUPKO_COG_Bdiv_stats_subsampling.xlsx")
+
+```
+
+## Procrustes Analysis
+```{r Procrustes: Taxonomic vs Functional profile}
+
+stats <- data.frame(NA)
+
+for (rank in list("Species", "Genus", "Family")) {
+  for (metric in list("jaccard", "bray")) {
+          # Taxonomic ordination
+          ps <- ps_m_r # Starting ps object
+          ps <- tax_glom(ps, taxrank = rank)
+          ps_ord <- phyloseq::distance(ps, method = metric, normalized = TRUE, binary = ifelse(metric == "jaccard", TRUE, FALSE))
+          ord_PCoA_tax <- ordinate(ps, "PCoA", distance = ps_ord)
+          
+          ord_PCoA <- ord_PCoA_tax
+          PC1_t_j <- round(ord_PCoA$values$Relative_eig[1]*100, 1)
+          PC2_t_j <- round(ord_PCoA$values$Relative_eig[2]*100, 1)
+          PC3_t_j <- round(ord_PCoA$values$Relative_eig[3]*100, 1)
+          PC4_t_j <- round(ord_PCoA$values$Relative_eig[4]*100, 1)
+          pcVar2_tax <- PC1_t_j + PC2_t_j
+          
+          # Functional ordination
+          ps <- ps_cog_r # Starting ps object
+          ps_ord <- phyloseq::distance(ps, method = metric, normalized = TRUE, binary = ifelse(metric == "jaccard", TRUE, FALSE))
+          ord_PCoA_fun <- ordinate(ps, "PCoA", distance = ps_ord)
+
+          ord_PCoA <- ord_PCoA_fun
+          PC1_f_j <- round(ord_PCoA$values$Relative_eig[1]*100, 1)
+          PC2_f_j <- round(ord_PCoA$values$Relative_eig[2]*100, 1)
+          PC3_f_j <- round(ord_PCoA$values$Relative_eig[3]*100, 1)
+          PC4_f_j <- round(ord_PCoA$values$Relative_eig[4]*100, 1)
+          pcVar2_fun <- PC1_f_j + PC2_f_j
+          
+          # Run Procrustes
+          pro <- procrustes(X = ord_PCoA_tax$vectors, Y = ord_PCoA_fun$vectors, symmetric = T)
+          
+          # Test significance
+          ptest <- protest(X = ord_PCoA_tax$vectors, Y = ord_PCoA_fun$vectors,
+                  scores = "sites", permutations = 999)
+          res <- ptest$signif
+          names(res) <- paste(metric,rank, sep = "_")
+          stats <- rbind(stats,res)
+          rownames(stats)[nrow(stats)] <- names(res)
+          
+          # Extract coordinates from procrustes analysis
+          df_tax <- cbind(pro$X, sample_data(ps))
+          df_tax$Profile <- "Taxonomic"
+          df_fun <- cbind(pro$Yrot, sample_data(ps))
+          df_fun$Profile <- "Functional"
+          colnames(df_fun) <- colnames(df_tax)
+          df <- rbind(df_tax,df_fun)
+          df$Genotype <- factor(df$Genotype, levels = c("WT", "KO"))
+          df$Sex <- factor(df$Sex, levels = c("Male", "Female"))
+          df$Litter <- as.factor(df$Litter)
+          df$Cage_ID <- as.factor(df$Cage_ID)
+          
+
+          # Plot
+          #analysis = paste0(rank)
+          full_metric <- ifelse(metric == "jaccard", "Jaccard Dissimilarity","Bray-Curtis Dissimilarity")
+          title = paste0("Procrustes: ",rank, " vs. COG Function ",full_metric)
+
+          # Plot
+          p <- ggplot(df, aes(x = Axis.1, y = Axis.2))
+          p <- p + geom_line(aes(group = Sample_ID, show.legend = F, color= Genotype), size = 0.5)
+          p <- p + geom_point(aes(fill = Genotype, shape = Profile, color = Genotype),
+                              size=3,  alpha = 0.8)
+          p <- p + facet_grid( ~ Sex) #scales = "free"
+          p <- p + scale_fill_manual(name = "Genotype", values = Genotype_color_pal)
+          p <- p + scale_color_manual(name = "Genotype", values = Genotype_color_pal)
+          p <- p + scale_shape_manual(name = "Profile", values = Profile_shape_pal)
+          p <- p + xlab(paste0("PC1"))
+          #p <- p + xlim(-0.5,0.5)
+          p <- p + ylab(paste0("PC2"))
+          #p <- p + ylim(-0.35,0.35)
+          p <- p + theme(
+                panel.background = element_rect(fill = "transparent",colour = "gray"),
+                plot.background = element_rect(fill = "transparent",colour = NA),
+                legend.background = element_rect(fill = "transparent",colour = NA),
+                panel.grid.major = element_blank(),
+                panel.grid.minor = element_blank(),
+                legend.key = element_rect(fill = "transparent",colour = NA),
+                axis.line = element_line(color = "gray50"))
+          p <- p + coord_fixed(sqrt(PC2 / PC1))
+          p
+
+          #Export figure as a PDF
+          pdf(paste0("Fig_Procrustes_",metric,"_",rank,"_Sex_facet_WTKO.pdf"), width = 8,height = 6)
+          print(p)
+          while (!is.null(dev.list()))  dev.off()
+  }
+}
+
+stats_all <- data.frame(stats[-1,], row.names = rownames(stats)[2:3])
+d <- data.frame(rownames(stats_all))
+d <- cbind(d, do.call(rbind, strsplit(as.character(d$rownames.stats_all.), "_", fixed=TRUE)))
+colnames(d) <- c("rownames.stats_all", "distance", "rank")
+stats_all <- cbind(d$rank,d$distance,stats_all)
+colnames(stats_all) <- c("Tax_Rank", "Distance_metric", "p-value")
+
+# Export stats summary table
+write_xlsx(stats_all, "MUPKO_Procrustes_TaxvFun_stats.xlsx")
+
+```
+
+
+# Alpha-Diversity
+
+## Taxonomic profiles
+
+### Genotype comparison
+```{r Alpha-div Tax: Genotype}
+
+stats <- data.frame(NA)
+
+for (rank in list("Species", "Genus", "Family")) {
+  for (sex in list("Male", "Female")) {
+      for (metric in list("diversity_shannon", "observed", "evenness_pielou")) {
+          ps <- ps_m_r # Starting ps object
+          ps <- tax_glom(ps, taxrank = rank)
+          ps <- subset_samples(ps, Sex == sex)
+          
+          # Calc alpha diversity
+          df <- data.frame(cbind(sample_data(ps), suppressMessages(microbiome::alpha(ps, metric))))
+          df$Genotype <- factor(df$Genotype, levels = c("WT", "KO"))
+          df$Sex <- factor(df$Sex, levels = c("Male", "Female"))
+          colnames(df)[13] <- "metric"
+          
+          # Box Plot
+          analysis = paste0(rank)
+          full_metric <- ifelse(metric == "diversity_shannon", "Shannon Diversity",
+                       ifelse(metric == "observed", "Observed Richness", "Pielou's Evenness"))
+          title = paste0(full_metric)
+
+          p <- ggplot(df, aes(x = Genotype, y = metric, fill = Genotype))
+          p <- p + geom_boxplot(show.legend = FALSE, outlier.shape = NA, width=0.5)
+          p <- p + geom_point(aes(fill = Genotype), shape = 21, alpha = 0.3, position = "jitter", show.legend = FALSE)
+          p <- p + scale_fill_manual(values = Genotype_color_pal)
+          #p <- p + facet_grid(~ Sex)
+          #p <- p + stat_compare_means(label = "p.signif", method = "wilcox.test",
+                    #p.adjust.method = "holm",
+                     #hide.ns = F, label.x.npc = 0.5, label.y.npc = 0.9) # label = "p.format"
+          p <- p + ylab(title)
+          p <- p + xlab("")
+          #p <- p + ylim(1, 3)
+          #p <- p + ggtitle(title)
+          p <- p + theme(
+                panel.background = element_rect(fill = "transparent",colour = NA),
+                plot.background = element_rect(fill = "transparent",colour = NA),
+                legend.background = element_rect(fill = "transparent",colour = NA),
+                panel.grid.major = element_blank(),
+                panel.grid.minor = element_blank(),
+                legend.key = element_rect(fill = "transparent",colour = NA),
+                axis.line = element_line(color = "gray50"))
+          p
+
+          # Export figure as a PDF
+          pdf(paste0("Fig_", metric,"_",analysis,"_",sex,"_WTKO_MPA4.pdf"), width = 4,height = 6)
+          print(p)
+          dev.off()
+
+          # Mixed effects model
+          fixed_effects <- paste(c("Genotype"), collapse = "*")
+          random_effects <- paste(c("Litter"), collapse = ") + (1|")
+          formula <- formula(paste0("metric ~ ", fixed_effects, "+ (1|",random_effects,")"))
+          model <- lmerTest::lmer(formula, df)
+          summary(model)
+          res <- summary(model)[["coefficients"]]
+
+          # Rename results columns and rownames
+          if (metric == "observed") {
+            colnames(res) <- paste(metric,"richness",rank,sex,colnames(res), sep = "_")
+          } else {
+            colnames(res) <- paste(metric,rank,sex,colnames(res), sep = "_")
+          }
+
+          # Append lme4 results to stats dataframe as new columns
+          stats <- cbind(stats,res)
+    }
+  }
+} 
+
+stats_all <- stats[,-1]
+
+# Separate columns and row names
+# Columns
+d <- data.frame(colnames(stats_all))
+d <- cbind(d, do.call(rbind, strsplit(as.character(d$colnames.stats_all.), "_", fixed=TRUE)))
+d[,2] <- paste0(d[,2],"_",d[,3]) 
+d <- d[,-3]
+colnames(d) <- c("colnames.stats_all", "metric", "rank", "sex", "stats")
+# Rows
+d2 <- data.frame(rownames(stats_all))
+d2 <- cbind(d2, do.call(rbind, strsplit(as.character(d2$rownames.stats_all.), "_", fixed=TRUE)))
+colnames(d2) <- c("rownames.stats_all", "factor")
+
+# Add column names
+stats_all <- rbind(d$rank,d$sex,d$metric,d$stats,stats_all)
+rownames(stats_all)[1:4] <- c("Tax_Rank", "Sex", "Metric", "Stats")
+# Add row names
+d2 <- rbind(NA,NA,NA,NA,d2)
+stats_all <- cbind(d2$factor,stats_all)
+colnames(stats_all)[1:2] <- colnames(d2)[2]
+
+# Export stats summary table
+write_xlsx(stats_all, "MUPKO_Adiv_stats_genotype.xlsx")
+
+```
+
+### Male subsampling
+```{r Alpha diversity: subsampling males}
+
+sex = "Male"
+
+stats <- data.frame(NA)
+
+for (male in list("219","224","256","257")) {
+  for (rank in list("Species", "Genus", "Family")) {
+      for (metric in list("diversity_shannon", "observed", "evenness_pielou")) {
+          ps <- ps_m_r # Starting ps object
+          ps <- tax_glom(ps, taxrank = rank)
+          ps <- subset_samples(ps, Sex == sex & Mouse_ID != male)
+          
+          # Calc alpha diversity
+          df <- data.frame(cbind(sample_data(ps), suppressMessages(microbiome::alpha(ps, metric))))
+          df$Genotype <- factor(df$Genotype, levels = c("WT", "KO"))
+          df$Sex <- factor(df$Sex, levels = c("Male", "Female"))
+          colnames(df)[13] <- "metric"
+
+          # Mixed effects model
+          fixed_effects <- paste(c("Genotype"), collapse = "*")
+          random_effects <- paste(c("Litter"), collapse = ") + (1|")
+          formula <- formula(paste0("metric ~ ", fixed_effects, "+ (1|",random_effects,")"))
+          model <- lmerTest::lmer(formula, df)
+          summary(model)
+          res <- summary(model)[["coefficients"]]
+
+          # Rename results columns and rownames
+          if (metric == "observed") {
+            colnames(res) <- paste(metric,"richness",rank,sex,male,colnames(res), sep = "_")
+          } else {
+            colnames(res) <- paste(metric,rank,sex,male,colnames(res), sep = "_")
+          }
+
+          # Append lme4 results to stats dataframe as new columns
+          stats <- cbind(stats,res)
+        }
+  }
+} 
+
+stats_all <- stats[,-1]
+
+# Separate columns and row names
+# Columns
+d <- data.frame(colnames(stats_all))
+d <- cbind(d, do.call(rbind, strsplit(as.character(d$colnames.stats_all.), "_", fixed=TRUE)))
+d[,2] <- paste0(d[,2],"_",d[,3]) 
+d <- d[,-3]
+colnames(d) <- c("colnames.stats_all", "metric", "rank", "sex", "male", "stats")
+# Rows
+d2 <- data.frame(rownames(stats_all))
+d2 <- cbind(d2, do.call(rbind, strsplit(as.character(d2$rownames.stats_all.), "_", fixed=TRUE)))
+colnames(d2) <- c("rownames.stats_all", "factor")
+
+# Add column names
+stats_all <- rbind(d$rank,d$male,d$sex,d$metric,d$stats,stats_all)
+rownames(stats_all)[1:5] <- c("Tax_Rank", "Male", "Sex", "Metric", "Stats")
+# Add row names
+d2 <- rbind(NA,NA,NA,NA,NA,d2)
+stats_all <- cbind(d2$factor,stats_all)
+colnames(stats_all)[1:2] <- colnames(d2)[2]
+
+# Export stats summary table
+write_xlsx(stats_all, "MUPKO_Adiv_stats_subsampling.xlsx")
+
+```
+
+## Functional profiles
+
+### Genotype comparison
+```{r Loop for alpha div analysis}
+
+stats <- data.frame(NA)
+
+for (rank in list("Function", "Level2")) {
+  for (sex in list("Male", "Female")) {
+      for (metric in list("diversity_shannon", "observed", "evenness_pielou")) {
+          ps <- ps_cog_r # Starting ps object
+          if (rank == "Function") {
+            } else {
+              ps <- tax_glom(ps, taxrank = rank)
+            }
+          ps <- subset_samples(ps, Sex == sex)
+          
+          # Calc alpha diversity
+          df <- data.frame(cbind(sample_data(ps), suppressMessages(microbiome::alpha(ps, metric))))
+          df$Genotype <- factor(df$Genotype, levels = c("WT", "KO"))
+          df$Sex <- factor(df$Sex, levels = c("Male", "Female"))
+          colnames(df)[13] <- "metric"
+          
+          #Plot
+          analysis = paste0(rank)
+          full_metric <- ifelse(metric == "diversity_shannon", "Shannon Diversity",
+                       ifelse(metric == "observed", "Observed Richness", "Pielou's Evenness"))
+          title = paste0(full_metric)
+
+          p <- ggplot(df, aes(x = Genotype, y = metric, fill = Genotype))
+          p <- p + geom_boxplot(show.legend = FALSE, outlier.shape = NA, width=0.5)
+          p <- p + geom_point(aes(fill = Genotype), shape = 21, alpha = 0.3, position = "jitter", show.legend = FALSE)
+          p <- p + scale_fill_manual(values = Genotype_color_pal)
+          p <- p + facet_grid(~ Sex)
+          #p <- p + stat_compare_means(label = "p.signif", method = "wilcox.test",
+                      #hide.ns = T, label.x.npc = 0.5, label.y.npc = 0.9) # label = "p.format"
+          p <- p + ylab(title)
+          p <- p + xlab("")
+          #p <- p + ggtitle(title)
+          p <- p + theme(
+                panel.background = element_rect(fill = "transparent",colour = NA),
+                plot.background = element_rect(fill = "transparent",colour = NA),
+                legend.background = element_rect(fill = "transparent",colour = NA),
+                panel.grid.major = element_blank(),
+                panel.grid.minor = element_blank(),
+                legend.key = element_rect(fill = "transparent",colour = NA),
+                axis.line = element_line(color = "gray50"))
+          p
+
+          # Export figure as a PDF
+          pdf(paste0("Fig_", metric,"_", analysis,"_",sex,"_COG_WTKO.pdf"), width = 4,height = 6)
+          print(p)
+          dev.off()
+          
+          # Mixed effects model
+          fixed_effects <- paste(c("Genotype"), collapse = "*")
+          random_effects <- paste(c("Litter"), collapse = ") + (1|")
+          formula <- formula(paste0("metric ~ ", fixed_effects, "+ (1|",random_effects,")"))
+          model <- lmerTest::lmer(formula, df)
+          res <- summary(model)[["coefficients"]]
+
+          # Rename results columns and rownames
+          if (metric == "observed") {
+            colnames(res) <- paste(metric,"richness",rank,sex,colnames(res), sep = "_")
+          } else {
+            colnames(res) <- paste(metric,rank,sex,colnames(res), sep = "_")
+          }
+
+          # Append lme4 results to stats dataframe as new columns
+          stats <- cbind(stats,res)
+    }
+  }
+} 
+
+stats_all <- stats[,-1]
+
+# Separate columns and row names
+# Columns
+d <- data.frame(colnames(stats_all))
+d <- cbind(d, do.call(rbind, strsplit(as.character(d$colnames.stats_all.), "_", fixed=TRUE)))
+d[,2] <- paste0(d[,2],"_",d[,3]) 
+d <- d[,-3]
+colnames(d) <- c("colnames.stats_all", "metric", "rank", "sex", "stats")
+# Rows
+d2 <- data.frame(rownames(stats_all))
+d2 <- cbind(d2, do.call(rbind, strsplit(as.character(d2$rownames.stats_all.), "_", fixed=TRUE)))
+colnames(d2) <- c("rownames.stats_all", "factor")
+
+# Add column names
+stats_all <- rbind(d$rank,d$sex,d$metric,d$stats,stats_all)
+rownames(stats_all)[1:4] <- c("Tax_Rank", "Sex", "Metric", "Stats")
+# Add row names
+d2 <- rbind(NA,NA,NA,NA,d2)
+stats_all <- cbind(d2$factor,stats_all)
+colnames(stats_all)[1] <- colnames(d2)[2]
+
+# Export stats summary table
+write_xlsx(stats_all, "MUPKO_COG_Adiv_stats_genotype.xlsx")
+
+```
+
+### Male subsampling
+```{r Alpha-div Fun: male subsampling}
+
+stats <- data.frame(NA)
+
+for (male in list("219","224","256","257")) {
+  for (rank in list("Function","Level2")) {
+      for (metric in list("diversity_shannon", "observed", "evenness_pielou")) {
+          ps <- ps_cog_r # Starting ps object
+          if (rank == "Function") {
+            } else {
+              ps <- tax_glom(ps, taxrank = rank)
+            }
+          ps <- subset_samples(ps, Sex = "Male" & Mouse_ID != male)
+          
+          # Calc alpha diversity
+          df <- data.frame(cbind(sample_data(ps), suppressMessages(microbiome::alpha(ps, metric))))
+          df$Genotype <- factor(df$Genotype, levels = c("WT", "KO"))
+          df$Sex <- factor(df$Sex, levels = c("Male", "Female"))
+          colnames(df)[13] <- "metric"
+
+          # Export figure as a PDF
+          pdf(paste0("Fig_", metric,"_", analysis,"_",timepoint,"_COG_WTKO.pdf"), width = 4,height = 6)
+          print(p)
+          dev.off()
+          
+          # Mixed effects model
+          fixed_effects <- paste(c("Genotype"), collapse = "*") 
+          random_effects <- paste(c("Litter"), collapse = ") + (1|")
+          formula <- formula(paste0("metric ~ ", fixed_effects, "+ (1|",random_effects,")"))
+          model <- lmerTest::lmer(formula, df)
+          res <- summary(model)[["coefficients"]]
+
+          # Rename results columns and rownames
+          if (metric == "observed") {
+            colnames(res) <- paste(metric,"richness",rank,sex,male,colnames(res), sep = "_")
+          } else {
+            colnames(res) <- paste(metric,rank,sex,male,colnames(res), sep = "_")
+          }
+
+          # Append lme4 results to stats dataframe as new columns
+          stats <- cbind(stats,res)
+    }
+  }
+} 
+
+stats_all <- stats[,-1]
+
+# Separate columns and row names
+# Columns
+d <- data.frame(colnames(stats_all))
+d <- cbind(d, do.call(rbind, strsplit(as.character(d$colnames.stats_all.), "_", fixed=TRUE)))
+d[,2] <- paste0(d[,2],"_",d[,3]) 
+d <- d[,-3]
+colnames(d) <- c("colnames.stats_all", "metric", "rank", "sex", "male", "stats")
+# Rows
+d2 <- data.frame(rownames(stats_all))
+d2 <- cbind(d2, do.call(rbind, strsplit(as.character(d2$rownames.stats_all.), "_", fixed=TRUE)))
+colnames(d2) <- c("rownames.stats_all", "factor")
+
+# Add column names
+stats_all <- rbind(d$rank,d$male,d$sex,d$metric,d$stats,stats_all)
+rownames(stats_all)[1:5] <- c("COG_Rank", "Male", "Sex", "Metric", "Stats")
+# Add row names
+d2 <- rbind(NA,NA,NA,NA,NA,d2)
+stats_all <- cbind(d2$factor,stats_all)
+colnames(stats_all)[1] <- colnames(d2)[2]
+
+# Export stats summary table
+write_xlsx(stats_all, "MUPKO_COG_Adiv_stats_subsampling.xlsx")
+
+```
+
+# Differencial Abundance  
+
+## Taxonomic profiles
+
+### Genotype comparisons
+```{r DA Tax: Genotype}
+
+# If ANCOM-BC 2 table has already been created, load it here to avoid redoing the analysis
+
+library(readxl)
+excel_file <- "C:/path/to/ANCOMBC2_mpa4_subsetting_results.xlsx"
+
+## Read all sheets from the Excel file
+sheet_names <- excel_sheets(excel_file)
+
+## Create an empty list to store the data frames
+DA_df <- list()
+
+## Loop through each sheet and read it as a data frame
+for (sheet_name in sheet_names) {
+  sheet_data <- read_excel(excel_file, sheet = sheet_name)
+  DA_df[[sheet_name]] <- sheet_data
+}
+
+da <- DA_df[["da_Genus_HC_Male"]] # choose dataframe
+
+da_list <- list()
+
+for (rank in list("Species", "Genus", "Family")) {
+  for (sex in list("Male", "Female")) {
+        ps <- ps_m_unr # Starting dataset with non-rarefied reads
+        ps <- tax_glom(ps, taxrank = rank) # Subset rank
+        ps <- subset_samples(ps, Sex == sex)
+
+        # ANCOM-BC function
+        set.seed(8675309) # for reproducibility
+        out <- ancombc2(data = ps, fix_formula = "Genotype", rand_formula = "(1|Litter)",
+                        group = "Genotype",
+                        p_adj_method = "holm", pseudo = 0, pseudo_sens = TRUE,
+                        prv_cut = 0.10, lib_cut = 0, s0_perc = 0.05,
+                        struc_zero = TRUE, neg_lb = TRUE,
+                        alpha = 0.05, n_cl = 2, verbose = TRUE,
+                        global = TRUE, pairwise = TRUE, dunnet = FALSE, trend = FALSE,
+                        iter_control = list(tol = 1e-2, max_iter = 20,
+                                            verbose = TRUE),
+                        em_control = list(tol = 1e-5, max_iter = 100),
+                        lme_control = lme4::lmerControl(),
+                        mdfdr_control = list(fwer_ctrl_method = "holm", B = 100),
+                        trend_control = list(contrast = list(matrix(c(1, 0, -1, 1),
+                                                                    nrow = 2,
+                                                                    byrow = TRUE),
+                                                             matrix(c(-1, 0, 1, -1),
+                                                                    nrow = 2,
+                                                                    byrow = TRUE)),
+                                             node = list(2, 2),
+                                             solver = "ECOS",
+                                             B = 100))
+        res <- out$res
+
+        # make dataframe w/ results
+        da <- res[, seq(1, ncol(res), by = 2)]
+        colnames(da) <- c("Taxa", "LFC","SE", "W", "p_val", "q_val", "diff_abn")
+        rownames(da) <- da$Taxa
+
+        # Add a taxonomy
+        da <- merge(da,tt_m,by="row.names", all=FALSE)
+        da <- da[-1]
+        #rownames(da) <- da[, rank]
+
+        # Add a column to the data frame to specify if they are UP- or DOWN- regulated
+        da$direction <- "NO"
+        da$direction[da$LFC > 0 & da$diff_abn == TRUE] <- "UP"
+        da$direction[da$LFC < 0 & da$diff_abn == TRUE] <- "DOWN"
+
+        # Create a new column that contains the name DA taxa (NA in case they are not)
+        da$dalabel <- NA
+        #da$dalabel <- rownames(da) <- da[, rank]
+        da$dalabel <- da[, rank]
+
+        #Color Palette
+        Gen_color_pal <- c("steelblue2", "lightgoldenrod2")
+        names(Gen_color_pal) <- c("WT", "KO")
+        comp_colors <- Gen_color_pal[!names(Gen_color_pal) %in% gen]
+        comp <- names(comp_colors)
+        Direction_color_pal <- c("grey55", Gen_color_pal)
+        names(Direction_color_pal) <- c("NO", "UP", "DOWN")
+
+        list_name <- paste0("da_",rank,"_",timepoint,"_",sex)
+        da <- DA_df[[list_name]]
+
+        #Volcano Plot w/ p-val
+        p <- ggplot(data=da, aes(x=LFC, y=-log10(p_val), label = dalabel), col=direction)
+        p <- p + geom_point(aes(fill = direction), shape = 21, width = 0.7, alpha = 0.5, position = "jitter", show.legend = FALSE)
+        p <- p + geom_label_repel(data = subset(da, diff_abn == TRUE), aes(label = dalabel, colour = factor(direction)), size = 3.5, show.legend = FALSE, box.padding = unit(0.35, "lines"), point.padding = unit(0.5, "lines"), max.overlaps = 100)
+        p <- p + scale_fill_manual(values = Direction_color_pal)
+        p <- p + scale_colour_manual(values = Direction_color_pal)
+        #p <- p + xlim(c(-3, 3))
+        #p <- p + scale_y_continuous(limits = c(0, 10))
+        p <- p + theme_minimal()
+        p <- p + theme(
+                panel.background = element_rect(fill = "transparent",colour = "gray"),
+                plot.background = element_rect(fill = "transparent",colour = NA),
+                legend.background = element_rect(fill = "transparent",colour = NA),
+                panel.grid.major = element_blank(),
+                panel.grid.minor = element_blank(),
+                legend.key = element_rect(fill = "transparent",colour = NA),
+                axis.line = element_line(color = "gray50"))
+        p
+        
+        #Save results by appending them to a list
+        da_list[[paste("da", rank, sex, sep = "_")]] <- da
+
+        # Export PDF
+        pdf(paste("Fig_ANCOMBC_mpa4_volcano_",rank,sex,".pdf", sep = "_"), width = 8,height = 6)
+        print(p)
+        while (!is.null(dev.list()))  dev.off()
+  }
+}
+
+# Export list of DA result dataframes as an Excel file
+df_list <- da_list # Chose dataframe list
+wb <- createWorkbook() # Create a new workbook
+
+# Add each dataframe as a separate sheet in the workbook
+for (i in seq_along(df_list)) {
+  addWorksheet(wb, sheetName = names(df_list)[i])
+  writeData(wb, sheet = i, x = df_list[[i]])
+}
+
+# Save the workbook to a file
+saveWorkbook(wb, "ANCOMBC2_mpa4_genotype.xlsx")
+```
+
+### Male subsampling
+```{r DA Tax: male subsampling}
+
+da_list <- list()
+
+for (male in list("219","224","256","257")) {
+  for (rank in list("Species", "Genus", "Family")) {
+        ps <- ps_m_unr # Starting dataset with non-rarefied reads
+        ps <- tax_glom(ps, taxrank = rank) # Subset rank
+        ps <- subset_samples(ps, Sex = "Male" & Mouse_ID != male)
+
+        # ANCOM-BC function
+        set.seed(8675309) # for reproducibility
+        out <- ancombc2(data = ps, fix_formula = "Genotype", rand_formula = "(1|Litter)",
+                        group = "Genotype",
+                        p_adj_method = "holm", pseudo = 0, pseudo_sens = TRUE,
+                        prv_cut = 0.10, lib_cut = 0, s0_perc = 0.05,
+                        struc_zero = TRUE, neg_lb = TRUE,
+                        alpha = 0.05, n_cl = 2, verbose = TRUE,
+                        global = TRUE, pairwise = TRUE, dunnet = FALSE, trend = FALSE,
+                        iter_control = list(tol = 1e-2, max_iter = 20,
+                                            verbose = TRUE),
+                        em_control = list(tol = 1e-5, max_iter = 100),
+                        lme_control = lme4::lmerControl(),
+                        mdfdr_control = list(fwer_ctrl_method = "holm", B = 100),
+                        trend_control = list(contrast = list(matrix(c(1, 0, -1, 1),
+                                                                    nrow = 2,
+                                                                    byrow = TRUE),
+                                                             matrix(c(-1, 0, 1, -1),
+                                                                    nrow = 2,
+                                                                    byrow = TRUE)),
+                                             node = list(2, 2),
+                                             solver = "ECOS",
+                                             B = 100))
+        res <- out$res
+
+        # make dataframe w/ results
+        da <- res[, seq(1, ncol(res), by = 2)]
+        colnames(da) <- c("Taxa", "LFC","SE", "W", "p_val", "q_val", "diff_abn")
+        rownames(da) <- da$Taxa
+
+        # Add a taxonomy
+        da <- merge(da,tt_m,by="row.names", all=FALSE)
+        da <- da[-1]
+        #rownames(da) <- da[, rank]
+
+        # Add a column to the data frame to specify if they are UP- or DOWN- regulated
+        da$direction <- "NO"
+        da$direction[da$LFC > 0 & da$diff_abn == TRUE] <- "UP"
+        da$direction[da$LFC < 0 & da$diff_abn == TRUE] <- "DOWN"
+
+        # Create a new column that contains the name DA taxa (NA in case they are not)
+        da$dalabel <- NA
+        #da$dalabel <- rownames(da) <- da[, rank]
+        da$dalabel <- da[, rank]
+
+        #Color Palette
+        Gen_color_pal <- c("steelblue2", "lightgoldenrod2")
+        names(Gen_color_pal) <- c("WT", "KO")
+        comp_colors <- Gen_color_pal[!names(Gen_color_pal) %in% gen]
+        comp <- names(comp_colors)
+        Direction_color_pal <- c("grey55", Gen_color_pal)
+        names(Direction_color_pal) <- c("NO", "UP", "DOWN")
+
+        list_name <- paste0("da_",rank,"_",timepoint,"_",sex)
+        da <- DA_df[[list_name]]
+
+        
+        #Save results by appending them to a list
+        da_list[[paste("da", rank, sex, male, sep = "_")]] <- da
+  }
+}
+
+# Export list of DA result dataframes as an Excel file
+df_list <- da_list # Chose dataframe list
+wb <- createWorkbook() # Create a new workbook
+
+# Add each dataframe as a separate sheet in the workbook
+for (i in seq_along(df_list)) {
+  addWorksheet(wb, sheetName = names(df_list)[i])
+  writeData(wb, sheet = i, x = df_list[[i]])
+}
+
+# Save the workbook to a file
+saveWorkbook(wb, "ANCOMBC2_mpa4_subsetting_male.xlsx")
+```
+
+## Functional profile
+
+### Genotype comparison
+```{r DA Fun: Genotype}
+
+COG_da_list <- list()
+
+for (rank in list("Function", "Level2")) {
+  for (sex in list("Male", "Female")) {
+        ps <- ps_cog # Starting dataset
+        if (rank == "Function") {
+        } else {
+          ps <- tax_glom(ps, taxrank = rank) # Subset rank
+        }
+        ps <- subset_samples(ps, Sex == sex)
+        
+        # ANCOM-BC function
+        set.seed(8675309) # for reproducibility
+        out <- ancombc2(data = ps, fix_formula = "Genotype", rand_formula = "(1|Litter)",
+                        group = "Genotype",
+                        p_adj_method = "holm", pseudo = 0, pseudo_sens = TRUE,
+                        prv_cut = 0.10, lib_cut = 0, s0_perc = 0.05,
+                        struc_zero = FALSE, neg_lb = TRUE,
+                        alpha = 0.05, n_cl = 2, verbose = TRUE,
+                        global = FALSE, pairwise = FALSE, dunnet = FALSE, trend = FALSE,
+                        iter_control = list(tol = 1e-2, max_iter = 20, 
+                                            verbose = TRUE),
+                        em_control = list(tol = 1e-5, max_iter = 100),
+                        lme_control = lme4::lmerControl(),
+                        mdfdr_control = list(fwer_ctrl_method = "holm", B = 100),
+                        trend_control = list(contrast = list(matrix(c(1, 0, -1, 1),
+                                                                    nrow = 2, 
+                                                                    byrow = TRUE),
+                                                             matrix(c(-1, 0, 1, -1),
+                                                                    nrow = 2, 
+                                                                    byrow = TRUE)),
+                                             node = list(2, 2),
+                                             solver = "ECOS",
+                                             B = 100))
+        res <- out$res
+        
+        # make dataframe w/ results
+        da <- res[, seq(1, ncol(res), by = 2)]
+        colnames(da) <- c("Function", "LFC","SE", "W", "p_val", "q_val", "diff_abn")
+        rownames(da) <- da$Function
+        
+        # Add a COG hierarchy
+        da <- merge(gt,da,by="Function", all=FALSE)
+        da <- da %>% relocate(Function, .after = Level2) # Change COG class column order
+        rownames(da) <- da$Function
+        
+        # Add a column to the data frame to specify if they are UP- or DOWN- regulated
+        da$direction <- "NO"
+        da$direction[da$LFC > 0 & da$diff_abn == "TRUE"] <- "UP"
+        da$direction[da$LFC < 0 & da$diff_abn == "TRUE"] <- "DOWN"
+        
+        # Create a new column that contains the name DA taxa (NA in case they are not)
+        da$dalabel <- NA
+        da$dalabel <- da[,rank]
+
+        #Color Palette
+        Gen_color_pal <- c("steelblue2", "lightgoldenrod2", "indianred2")
+        names(Gen_color_pal) <- c("WT", "KO", "HT")
+        comp_colors <- Gen_color_pal[!names(Gen_color_pal) %in% gen]
+        comp <- names(comp_colors)
+        Direction_color_pal <- c("grey55", comp_colors)
+        names(Direction_color_pal) <- c("NO", "UP", "DOWN")
+
+        #Volcano Plot w/ p-val
+        p <- ggplot(data=da, aes(x=LFC, y=-log10(q_val), label = dalabel), col=direction)
+        p <- p + geom_point(aes(fill = direction), shape = 21, alpha = 0.5, position = "jitter", show.legend = FALSE)
+        #p <- p + geom_label_repel(data = subset(da, diff_abn == "TRUE"), aes(label = dalabel, colour = factor(direction)), size = 3.5, show.legend = FALSE, box.padding = unit(1, "lines"), point.padding = unit(1, "lines"), max.overlaps = 100)
+        p <- p + scale_fill_manual(values = Direction_color_pal)
+        p <- p + scale_colour_manual(values = Direction_color_pal)
+        #p <- p + xlim(c(-3, 3))
+        #p <- p + scale_y_continuous(limits = c(0, 13))
+        p <- p + ggtitle(paste0('Volcano Plot: ', rank," ",timepoint," ",sex," ",comp[1], " vs. ", comp[2]))
+        p <- p + theme(
+                panel.background = element_rect(fill = "transparent",colour = "gray"),
+                plot.background = element_rect(fill = "transparent",colour = NA),
+                legend.background = element_rect(fill = "transparent",colour = NA),
+                panel.grid.major = element_blank(),
+                panel.grid.minor = element_blank(),
+                legend.key = element_rect(fill = "transparent",colour = NA),
+                axis.line = element_line(color = "gray50"))
+        p
+        
+        #Save results by appending them to a list
+        COG_da_list[[paste("da", rank, sex, sep = "_")]] <- da
+        
+        # Export PDF
+        pdf(paste("Fig_ANCOMBC_COG_volcano", rank, sex, ".pdf", sep = "_"), width = 8,height = 6)
+        print(p)
+        while (!is.null(dev.list()))  dev.off()
+  }
+}
+
+# Export list of DA result dataframes as an Excel file
+df_list <- COG_da_list # Chose dataframe list
+wb <- createWorkbook() # Create a new workbook
+
+# Add each dataframe as a separate sheet in the workbook
+for (i in seq_along(df_list)) {
+  addWorksheet(wb, sheetName = names(df_list)[i])
+  writeData(wb, sheet = i, x = df_list[[i]])
+}
+
+# Save the workbook to a file
+saveWorkbook(wb, "ANCOMBC2_COG_genotype.xlsx")
+
+```
+
+### Male subsampling
+```{r DA Fun: subsampling}
+
+COG_da_list <- list()
+
+for (rank in list("Function", "Level2")) {
+  for (male in list("219","224","256","257")) {
+        ps <- ps_cog # Starting dataset
+        if (rank == "Function") {
+        } else {
+          ps <- tax_glom(ps, taxrank = rank) # Subset rank
+        }
+        ps <- subset_samples(ps, Sex = "Male" & Mouse_ID!= male)
+        
+        # ANCOM-BC function
+        set.seed(8675309) # for reproducibility
+        out <- ancombc2(data = ps, fix_formula = "Genotype", rand_formula = "(1|Litter)",
+                        group = "Genotype",
+                        p_adj_method = "holm", pseudo = 0, pseudo_sens = TRUE,
+                        prv_cut = 0.10, lib_cut = 0, s0_perc = 0.05,
+                        struc_zero = FALSE, neg_lb = TRUE,
+                        alpha = 0.05, n_cl = 2, verbose = TRUE,
+                        global = FALSE, pairwise = FALSE, dunnet = FALSE, trend = FALSE,
+                        iter_control = list(tol = 1e-2, max_iter = 20, 
+                                            verbose = TRUE),
+                        em_control = list(tol = 1e-5, max_iter = 100),
+                        lme_control = lme4::lmerControl(),
+                        mdfdr_control = list(fwer_ctrl_method = "holm", B = 100),
+                        trend_control = list(contrast = list(matrix(c(1, 0, -1, 1),
+                                                                    nrow = 2, 
+                                                                    byrow = TRUE),
+                                                             matrix(c(-1, 0, 1, -1),
+                                                                    nrow = 2, 
+                                                                    byrow = TRUE)),
+                                             node = list(2, 2),
+                                             solver = "ECOS",
+                                             B = 100))
+        res <- out$res
+        
+        # make dataframe w/ results
+        da <- res[, seq(1, ncol(res), by = 2)]
+        colnames(da) <- c("Function", "LFC","SE", "W", "p_val", "q_val", "diff_abn")
+        rownames(da) <- da$Function
+        
+        # Add a COG hierarchy
+        da <- merge(gt,da,by="Function", all=FALSE)
+        da <- da %>% relocate(Function, .after = Level2) # Change COG class column order
+        rownames(da) <- da$Function
+        
+        # Add a column to the data frame to specify if they are UP- or DOWN- regulated
+        da$direction <- "NO"
+        da$direction[da$LFC > 0 & da$diff_abn == "TRUE"] <- "UP"
+        da$direction[da$LFC < 0 & da$diff_abn == "TRUE"] <- "DOWN"
+        
+        # Create a new column that contains the name DA taxa (NA in case they are not)
+        da$dalabel <- NA
+        da$dalabel <- da[,rank]
+        
+        #Save results by appending them to a list
+        COG_da_list[[paste("da", rank, timepoint, sex, male, sep = "_")]] <- da
+  }
+}
+
+# Export list of DA result dataframes as an Excel file
+df_list <- COG_da_list # Chose dataframe list
+wb <- createWorkbook() # Create a new workbook
+
+# Add each dataframe as a separate sheet in the workbook
+for (i in seq_along(df_list)) {
+  addWorksheet(wb, sheetName = names(df_list)[i])
+  writeData(wb, sheet = i, x = df_list[[i]])
+}
+
+# Save the workbook to a file
+saveWorkbook(wb, "ANCOMBC2_COG_subsetting_results_male.xlsx")
+
+```
+
+### Enrichment
+https://seqqc.wordpress.com/2019/07/25/how-to-use-phyper-in-r/
+```{r Enrichment}
+
+# Import dataframe
+library(readxl)
+excel_file <- "C:/path/to/ANCOMBC2_COG_subsetting_results.xlsx"
+sheet_names <- excel_sheets(excel_file)
+DA_df <- list()
+
+# Loop through each sheet and read it as a data frame
+for (sheet_name in sheet_names) {
+  sheet_data <- read_excel(excel_file, sheet = sheet_name)
+  DA_df[[sheet_name]] <- sheet_data
+}
+
+stats <- data.frame(NA)
+
+for (timepoint in list("HC", "BC")) {
+  for (sex in list("Male", "Female")) {
+    for (gen in list("WT", "KO")) {
+        # Select COG DA dataframe
+        df_name <- paste("da_Function",sex,sep = "_") 
+        da <- DA_df[[df_name]]
+        
+        # Subset dataset based on DA in WT or KO
+        if (gen == "WT") {
+          da <- subset(da, LFC > 0)
+        } else {
+          da <- subset(da, LFC < 0)
+          }
+        
+        # List of COG Categories and Pathways
+        COG_Cat <- unique(da$Level1)
+        COG_Path <- unique(da$Level2)
+        
+        for (cat in COG_Path) {
+          # Hypergeometric test
+          Cat_DA_genes <- sum(da$Level2 == cat & da$q_val <= 0.001)
+          #Cat_DA_genes <- sum(da$Level1 == cat & da$diff_abn == TRUE) # DA Genes belonging to a certain functional Category or Pathway
+          DA_genes <- sum(da$q_val <= 0.001) # Total DA genes
+          Cat_genes <- sum(da$Level2 == cat) # Total genes in dataset belonging to a certain functional Category or Pathway
+          Total_genes <- nrow(da) # Total genes in the dataset
+          
+          # Test Enrichment
+          res <- phyper(Cat_DA_genes-1, Cat_genes, Total_genes-Cat_genes, DA_genes,lower.tail= FALSE)
+          
+          names(res) <- paste(sex,gen,cat, sep = "_")
+          stats <- rbind(stats,res)
+          rownames(stats)[nrow(stats)] <- names(res)
+        }
+    }
+  }
+}
+
+stats_all <- stats
+
+# Separate columns and row names
+# Columns
+d <- data.frame(rownames(stats_all))
+d <- cbind(d, do.call(rbind, strsplit(as.character(d$rownames.stats_all.), "_", fixed=TRUE)))
+colnames(d) <- c("rownames.stats_all.", "Sex", "Genotype", "Category")
+
+stats_all <- cbind(d$Sex,d$Genotype,d$Category,stats_all)
+colnames(stats_all)[1:3] <- colnames(d)[2:4]
+colnames(stats_all)[4] <- "Hyperg_pval"
+stats_all <- stats_all[-1,]
+
+# Export stats summary table
+write_xlsx(stats_all, "MUPKO_COG_Pathway_Enrichment.xlsx")
+
+```
