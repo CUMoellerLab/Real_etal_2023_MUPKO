@@ -219,6 +219,27 @@ ps_cog_r <- rarefy_even_depth(ps, rngseed = 8675309, sample.size = min(count$NA.
 
 ```
 
+##Read number
+```{r Read number}
+# Check whether there are differences between the groups in the unrarefied read number
+
+reads <- read.table("C:/path/to/directory/with/MUPKO_read_count.txt", header = TRUE, sep = "\t")
+
+df <- merge(reads, md[, c(2, 11, 12)], by = "Sample_ID", all.x = TRUE)
+df$Genotype <- factor(df$Genotype, levels = c("WT", "KO"))
+df$Sex <- factor(df$Sex, levels = c("Male", "Female"))
+df$Sex_Genotype <- as.factor(df$Sex_Genotype)
+df$Litter <- as.factor(df$Litter)
+
+# Mixed effects model
+  fixed_effects <- paste(c("Genotype", "Sex"), collapse = "*")
+  random_effects <- paste(c("Litter"), collapse = ") + (1|")
+  formula <- formula(paste0("Reads_preQC ~ ", fixed_effects, "+ (1|",random_effects,")"))
+  model <- lmerTest::lmer(formula, df)
+  formula
+  summary(model)
+```
+
 # Beta-Diversity
 ## Taxonomic profiles
 
