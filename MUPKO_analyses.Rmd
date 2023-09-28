@@ -228,16 +228,28 @@ reads <- read.table("C:/path/to/directory/with/MUPKO_read_count.txt", header = T
 df <- merge(reads, md[, c(2, 11, 12)], by = "Sample_ID", all.x = TRUE)
 df$Genotype <- factor(df$Genotype, levels = c("WT", "KO"))
 df$Sex <- factor(df$Sex, levels = c("Male", "Female"))
-df$Sex_Genotype <- as.factor(df$Sex_Genotype)
 df$Litter <- as.factor(df$Litter)
 
 # Mixed effects model
   fixed_effects <- paste(c("Genotype", "Sex"), collapse = "*")
   random_effects <- paste(c("Litter"), collapse = ") + (1|")
-  formula <- formula(paste0("Reads_preQC ~ ", fixed_effects, "+ (1|",random_effects,")"))
+  formula <- formula(paste0("Reads_postQC ~ ", fixed_effects, "+ (1|",random_effects,")"))
   model <- lmerTest::lmer(formula, df)
   formula
   summary(model)
+  
+# Wilcoxon test comparing Read Count between Mup Genotypes and Sexes
+stat_df <- df %>%
+  wilcox_test(Reads_postQC ~ Genotype, p.adjust.method = "holm") %>%
+  add_significance("p") %>%
+  add_xy_position(x = "Genotype")
+stat_df
+  
+stat_df <- df %>%
+  wilcox_test(Reads_postQC ~ Sex, p.adjust.method = "holm") %>%
+  add_significance("p") %>%
+  add_xy_position(x = "Sex")
+stat_df
 ```
 
 # Beta-Diversity
