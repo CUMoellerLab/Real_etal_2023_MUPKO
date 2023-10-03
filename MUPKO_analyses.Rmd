@@ -1937,3 +1937,76 @@ stats_all <- stats_all[-1,]
 write_xlsx(stats_all, "MUPKO_COG_Pathway_Enrichment.xlsx")
 
 ```
+
+### Bakta
+```{r Bakta}
+# Annotate the MAGs used in MetaPhlan4 SGB43260 (differentially abundant taxon in ANCOM-BC2) with Bakta
+# Check if DA COGs are present in the DA taxon SGB43260
+library(data.table)
+
+# Import .tsv Bakta outputs
+putative_tsv <- list.files(path = "/path/to/bakta_functional_annotation/SGB43260/Putative", pattern = "\\.tsv", full.names = TRUE)
+
+DA_COGs <- list("pantothenate", "symporter", "asparaginase", "superoxide dismutase", "endopeptidase", "secretory", "EscU", "o-acety", "cephalosporin")
+
+term = "pantothenate"
+putative_tsv
+file <- putative_tsv[29]
+
+DA_COG_table <- data.frame()
+bakta_stats <- data.frame()
+
+for (file in putative_tsv) {
+  # Import .tsv bakta files
+  data <- fread(file, header = TRUE, sep = "\t")
+  
+  # Search for DA_COGs
+  DA_COG_hits <- data.frame()
+  for (term in DA_COGs) {
+    rows <- data[grep(term, data$Product, ignore.case = TRUE), , drop = FALSE]
+    if (nrow(rows) > 0) {
+      rows$Search_Term <- term
+      DA_COG_hits <- rbind(DA_COG_hits, rows)
+    } else {
+    }
+  }
+  
+  # Check if DA_COG_hits is not NULL and has rows
+  if (!is.null(DA_COG_hits) && nrow(DA_COG_hits) > 0) {
+      DA_COG_hits$MAG <- basename(file)
+      DA_COG_table <- rbind(DA_COG_table, DA_COG_hits)
+  }
+  else {
+  }
+}
+
+write.table(DA_COG_table, "MUPKO_SGB43260_bakta_annotations.tsv", sep = "\t", quote = FALSE, row.names = FALSE)
+
+
+
+## Get bakta summary files
+file_paths <- list.files(path = "/path/to/bakta_functional_annotation/SGB43260/txt_files", pattern = "*.txt", full.names = TRUE)
+
+#file_path <- file_paths[1]
+
+result_df <- data.frame()
+
+for (file_path in file_paths) {
+  file_content <- readLines(file_path)
+  df <- data.frame(file_content)
+  df <- df[c(2:7, 10:24),]
+  
+  info_df <- data.frame(matrix(unlist(strsplit(df, ": ")), ncol = 2, byrow = TRUE))
+  names(info_df) <- c("Metric", "Value")
+  
+  # Transpose the data to have Metric as column names
+  transposed_df <- data.frame(t(info_df$Value))
+  names(transposed_df) <- info_df$Metric
+  transposed_df$MAG <- basename(file_path)
+  
+  result_df <- rbind(result_df, transposed_df)
+}
+
+# Save the result data frame to a file
+write.table(result_df, "MUPKO_SGB43260_bakta_summary.tsv", sep = "\t", quote = FALSE, row.names = FALSE)
+```
