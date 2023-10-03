@@ -118,7 +118,19 @@ merge_metaphlan_tables.py *.txt > Stress_mpa4_unraref_hostfilter.txt
 
 
 ## Rarefy
-### We rarefied fastq to 1 million reads before taxonomically classifying them with MetaPhlan 4.0
+
+### Get the read count for your FASTQ files, in order to decide on a rarefication threshold
+  # Create or clear the output file
+  > MUPKO_read_count.txt
+  # Iterate over each "*R1.fastq" file in the directory
+  for file in *R1.fastq; do
+      # Count the number of lines in the file and divide by 4
+      read_count=$(( $(wc -l < "$file") / 4 ))
+      # Print the file name and the read count to the output file
+      echo "$file, $read_count" >> MUPKO_read_count.txt
+  done
+
+### In our study, we rarefied the FASTQ files to 1 million reads before taxonomically classifying them with MetaPhlan 4.0
 ### The rarefied profiles were used for alpha and beta diversity analyses
 ### Refer to https://github.com/lh3/seqtk
 
@@ -146,4 +158,26 @@ cat listofprefixes.txt | while read -r LINE;
     seqtk sample -s100 original_unrarefied/${file2} 1000000 > rarefied/${file%_*}_raref_R2.fastq
 done
 
-### Repeat previously described quality control, holst-filtering, and MetaPhlan 4.0 classification for rarefied reads!
+### Repeat previously described quality control, host-filtering, and MetaPhlan 4.0 classification for the rarefied reads!
+
+## Functional annotation with Bakta (v1.7.0)
+
+### We wanted to assess if the differentially abundant (DA) COG functions were present in DA taxon SGB43260.
+### To that end, we functionally annotated the MAGs that made up the species-level bin with Bakta (https://github.com/oschwengers/bakta)
+
+for file in /path/to/directory/with/SGB43260_MAGs/MAGs/*
+  do
+    prefix=$(basename "${file%.fna.bz2}")
+    date +'%Y-%m-%d %H:%M:%S'
+    echo "Annotating MAG: $prefix"
+
+    mkdir -p /path/to/directory/with/SGB43260_MAGs/bakta_results/${prefix}
+
+    # Annotated MAG w/ bakta
+    singularity exec --bind $PWD --pwd $PWD /programs/bakta-1.7.0/bakta.sif \
+    bash -c "source /opt/conda/bashrc; bakta --db /path/to/directory/with/bakta/db \
+    --verbose --output /path/to/directory/with/SGB43260_MAGs/bakta_results/${prefix} \
+    --threads 50 /path/to/directory/with/SGB43260_MAGs/MAGs/${prefix}.fna.bz2"
+done >> /path/to/directory/with/SGB43260_MAGs/bakta_log.txt 2>&1
+
+### We downloaded the output.tsv tables and analysed them in R.  
