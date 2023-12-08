@@ -14,8 +14,13 @@ R markdown file with code used to produce the figures and tables included in Rea
 Supplemental tables not included in the main body of Real et al. 2023.
 
 **Table S1** Results from PERMANOVA and PERMDISP testing the effect of mouse sex on the taxonomic and functional composition of the gut microbiota.
+
 **Table S2** Results from PERMANOVA and PERMDISP testing the effect of _Mup_ genotype on the taxonomic and functional composition of the gut microbiota.
+
 **Table S3** Results from Procrustes testing the correspondence between the taxonomic and functional profiles.
+
 **Table S4** Results from linear mixed-effects models testing the effect of _Mup_ genotype on the taxonomic and functional diversity of the gut microbiota.
+
 **Table S5** Results from ANCOM-BC2 testing the differential abundance of specific taxa and/or functions between _Mup_ KO and WT mice.
+
 **Table S6** Results from hypergeometric tests of COG Category enrichment.
